@@ -848,6 +848,87 @@ lineage_utils.py contains lineage-specific logic (MLflow now, UC later).
 
 
 
+#########
+Subtask: Lineage Query Capability
+
+Include:
+
+Implement composite-score-based Champion/Challenger selection.
+Expose promotion metadata in the lineage response.
+Resolve registered model → source run → evaluation run.
+Return standardized lineage JSON (metrics, tags, artifacts, dataset version, promotion metadata).
+Subtask: UC Lineage Tags
+
+Include:
+
+Add Unity Catalog alias support (Champion/Challenger) behind the UC toggle.
+Add UC-specific lineage tags and metadata.
+Integrate Model Card metadata into lineage when available.
+Extend lineage with UC information once enabled.
+
+This way you don't need separate promotion subtasks. The promotion logic becomes part of Lineage Query Capability, while the UC-specific implementation (aliases, UC tags, future UC lineage) naturally belongs under UC Lineage Tags. This keeps the number of subtasks small and aligns with the existing story structure.
+
+While the other subtasks still remain the same, right? Like the one those were suggested by someone else. I hope anything is not kind of duplicating.
+
+Yes, that's correct. The original subtasks remain unchanged, and with the mapping we discussed there isn't any significant duplication.
+
+Here's the mapping:
+
+✅ Design lineage data model and API contract → Design only.
+✅ Implement MLflow lineage resolver → Build the resolver that gathers MLflow information.
+✅ Expose lineage through API → API layer only.
+✅ Notebook for ad hoc lineage exploration → Notebook/UI for testing and exploration.
+✅ Documentation of lineage and API integration → Documentation only.
+
+Then your additional subtasks fit naturally:
+
+✅ Lineage Query Capability → Composite score, Champion/Challenger selection, promotion metadata, and complete lineage response.
+✅ UC Lineage Tags → UC aliases, UC-specific tags, future UC lineage integration, and Model Card integration when available.
+
+So the responsibilities are distinct:
+
+The resolver fetches lineage.
+The query capability enriches it with promotion-related information.
+The UC lineage tags handle Unity Catalog-specific enhancements.
+
+That separation avoids overlap while keeping the work logically organized.
+
+
+Existing subtasks (keep these)
+1. Design lineage data model and API contract
+Design lineage JSON schema.
+Define API request/response contract.
+Document required MLflow tags, parameters, and inputs.
+Keep placeholders for UC lineage and promotion metadata.
+2. Implement MLflow lineage resolver
+Resolve registered model → source run → evaluation run.
+Retrieve tags, parameters, metrics, artifacts, dataset version.
+Return standardized lineage JSON.
+Add UC support behind a toggle (future).
+3. Expose lineage through API
+Add lineage API endpoint.
+Integrate with lineage resolver.
+Return appropriate responses and error handling.
+4. Notebook for ad hoc lineage exploration
+Query lineage using the resolver.
+Display run metadata, dataset version, metrics, artifacts.
+Validate lineage output.
+5. Documentation of lineage and API integration
+Document lineage architecture.
+Document API usage.
+Document MLflow + UC integration flow.
+Additional subtasks for your story
+6. Champion–Challenger Promotion Framework
+Compute composite score.
+Rank evaluated models.
+Select Champion and Challenger.
+Prepare promotion metadata for registration.
+7. UC Alias & Model Card Integration (clubbed)
+Integrate Champion/Challenger aliases with UC (behind toggle).
+Generate and log Model Card.
+Surface alias and Model Card in lineage response.
+
+
 
       
 
