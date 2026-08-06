@@ -939,3 +939,153 @@ Surface alias and Model Card in lineage response.
 ✅ Enhance with Unity Catalog lineage when UC is enabled.
 
 This order lets you complete everything that depends only on MLflow now, while keeping the UC integration as a straightforward extension later.
+
+
+
+
+#########
+
+
+import pandas as pd
+
+
+def calculate_composite_score(eval_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate weighted composite score.
+    Assumes composite_score column is added.
+    """
+
+    # Already implemented by you.
+    return eval_df
+
+
+def _rank_models(
+    eval_df: pd.DataFrame,
+) -> pd.DataFrame:
+
+    ranked_df = (
+        eval_df
+        .sort_values(
+            by="composite_score",
+            ascending=False,
+        )
+        .reset_index(drop=True)
+    )
+
+    ranked_df["rank"] = ranked_df.index + 1
+
+    return ranked_df
+
+
+def _select_champion(
+    ranked_df: pd.DataFrame,
+):
+
+    if ranked_df.empty:
+        return None
+
+    return ranked_df.iloc[0].to_dict()
+
+
+def _select_challenger(
+    ranked_df: pd.DataFrame,
+):
+
+    if len(ranked_df) < 2:
+        return None
+
+    return ranked_df.iloc[1].to_dict()
+
+
+def _prepare_alias_mapping(
+    champion,
+    challenger,
+):
+
+    alias_mapping = {}
+
+    if champion:
+
+        alias_mapping[
+            champion["model_name"]
+        ] = "Champion"
+
+    if challenger:
+
+        alias_mapping[
+            challenger["model_name"]
+        ] = "Challenger"
+
+    return alias_mapping
+
+
+def prepare_promotion_metadata(
+    eval_df: pd.DataFrame,
+) -> dict:
+    """
+    Main promotion function.
+
+    Returns
+    -------
+    {
+        "ranked_models": dataframe,
+        "champion": {...},
+        "challenger": {...},
+        "aliases": {...}
+    }
+    """
+
+    ranked_df = _rank_models(eval_df)
+
+    champion = _select_champion(ranked_df)
+
+    challenger = _select_challenger(ranked_df)
+
+    aliases = _prepare_alias_mapping(
+        champion,
+        challenger,
+    )
+
+    return {
+
+        "ranked_models": ranked_df,
+
+        "champion": champion,
+
+        "challenger": challenger,
+
+        "aliases": aliases,
+    }
+
+
+######
+
+
+evaluate_product()
+        │
+        ▼
+evaluation_df
+        │
+        ▼
+add_quality_labels()
+        │
+        ▼
+evaluation_labels_df
+        │
+        ▼
+calculate_composite_score()
+        │
+        ▼
+evaluation_df (with composite_score)
+        │
+        ▼
+prepare_promotion_metadata()
+        │
+        ▼
+promotion_info
+        │
+        ▼
+Register each model using its alias
+        │
+        ▼
+Log promotion metadata
