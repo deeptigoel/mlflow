@@ -36,6 +36,67 @@ This becomes the contract for both the notebook and the API.
 
 File:
 
+
+######
+
+
+)
+
+
+            # ----------------------------
+            # Promotion Summary
+            # ----------------------------
+
+            print("Champion :", promotion_info["champion_model"])
+            print("Challenger :", promotion_info["challenger_model"])
+
+            mlflow.set_tag(
+                "champion_model",
+                promotion_info["champion_model"],
+            )
+
+            if promotion_info["challenger_model"] is not None:
+
+                mlflow.set_tag(
+                    "challenger_model",
+                    promotion_info["challenger_model"],
+                )
+
+            mlflow.log_metric(
+                "champion_composite_score",
+                promotion_info["champion_score"],
+            )
+
+            if promotion_info["challenger_score"] is not None:
+
+                mlflow.log_metric(
+                    "challenger_composite_score",
+                    promotion_info["challenger_score"],
+                )
+
+
+            for model in registered_models:
+
+                alias = promotion_info["aliases"].get(
+                    model["model_name"],
+                    "",
+                )
+
+                register_model_to_uc(
+                    run_id=parent_run_id,
+                    model_name=model["model_name"],
+                    catalog=UC_CATALOG,
+                    schema=UC_SCHEMA,
+                    alias=alias,
+                    ...
+                )
+
+
+
+            
+
+    
+
 lineage_utils.py (response object/dataclass)
 README or design notes
 2. Implement MLflow lineage resolver
