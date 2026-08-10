@@ -1,90 +1,161 @@
-if model_exists(registered_name, client):
+from typing import Optional
 
-    logger.info(
-        "Model '%s' already exists in registry. "
-        "Skipping model registration.",
-        registered_name,
-    )
+import mlflow
 
-    # Get existing registered versions
-    versions = client.search_model_versions(
-        f"name = '{registered_name}'"
-    )
 
-    if not versions:
-        raise RuntimeError(
-            f"Model '{registered_name}' exists, "
-            "but no model versions were found."
+def set_source_lineage_tags(
+    source_delta_table_version: Optional[str] = None,
+    source_file_type: Optional[str] = None,
+    source_path: Optional[str] = None,
+    silver_table_name: Optional[str] = None,
+    uc_catalog: Optional[str] = None,
+    uc_schema: Optional[str] = None,
+    workspace_schema: Optional[str] = None,
+) -> None:
+    """
+    Set MLflow source-lineage tags for Delta-table or file-based inputs.
+
+    Delta sources:
+        - source_type
+        - source_delta_table_name
+        - source_delta_table_version
+        - source_table_catalog
+        - source_table_schema
+        - source_table_full_name
+
+    File sources:
+        - source_type
+        - source_path
+
+    Args:
+        source_delta_table_version:
+            Version of the source Delta table. If provided, the source
+            is treated as a Delta source.
+
+        source_file_type:
+            File type such as 'csv' or 'excel'. Used when the source
+            is not a Delta table.
+
+        source_path:
+            Path to the source file for CSV/Excel inputs.
+
+        silver_table_name:
+            Name of the Silver Delta table.
+
+        uc_catalog:
+            Unity Catalog catalog name, when applicable.
+
+        uc_schema:
+            Unity Catalog schema name, when applicable.
+
+        workspace_schema:
+            Workspace/schema name used when Unity Catalog is not applicable.
+    """
+
+    tags = {}
+
+    # ---------------------------------------------------------
+    # Delta source
+    # ---------------------------------------------------------
+    if source_delta_table_version is not None:
+
+        if not silver_table_name:
+            raise ValueError(
+                "silver_table_name is required for a Delta source."
+            )
+
+        tags.update(
+            {
+                "source_type": "delta",
+                "source_delta_table_name": silver_table_name,
+                "source_delta_table_version": str(
+                    source_delta_table_version
+                ),
+            }
         )
 
-    # Return the latest existing version
-    latest_version = max(
-        versions,
-        key=lambda v: int(v.version),
-    )
+        # Unity Catalog
+        if uc_catalog and uc_schema:
 
-    return {
-        "registered_name": registered_name,
-        "version": latest_version.version,
-        "already_registered": True,
-    }
+            tags.update(
+                {
+                    "source_table_catalog": uc_catalog,
+                    "source_table_schema": uc_schema,
+                    "source_table_full_name": (
+                        f"{uc_catalog}."
+                        f"{uc_schema}."
+                        f"{silver_table_name}"
+                    ),
+                }
+            )
 
-####
+        # Non-UC workspace/schema
+        elif workspace_schema:
 
+            tags.update(
+                {
+                    "source_table_schema": workspace_schema,
+                    "source_table_full_name": (
+                        f"{workspace_schema}."
+                        f"{silver_table_name}"
+                    ),
+                }
+            )
 
-logger.info(
-    "Registering model '%s'.",
-    registered_name,
+        # No catalog/schema information
+        else:
+
+            tags["source_table_full_name"] = silver_table_name
+
+    # ---------------------------------------------------------
+    # File source - CSV / Excel
+    # ---------------------------------------------------------
+    elif source_file_type:
+
+        if not source_path:
+            raise ValueError(
+                "source_path is required for a file-based source."
+            )
+
+        file_type = source_file_type.lower().strip()
+
+        if file_type in {"xlsx", "xls", "excel"}:
+            normalized_type = "excel"
+
+        elif file_type == "csv":
+            normalized_type = "csv"
+
+        else:
+            normalized_type = file_type
+
+        tags.update(
+            {
+                "source_type": normalized_type,
+                "source_path": str(source_path),
+            }
+        )
+
+    # ---------------------------------------------------------
+    # Invalid / missing source information
+    # ---------------------------------------------------------
+    else:
+        raise ValueError(
+            "Either source_delta_table_version or "
+            "source_file_type must be provided."
+        )
+
+    # ---------------------------------------------------------
+    # Set all generated tags on the active MLflow run
+    # ---------------------------------------------------------
+    mlflow.set_tags(tags)
+
+set_source_lineage_tags(
+    source_delta_table_version=SOURCE_DELTA_TABLE_VERSION,
+    source_file_type=SOURCE_FILE_TYPE,
+    source_path=INPUT_FILE_PATH,
+    silver_table_name=SILVER_TABLE_NAME,
 )
 
-registered_model = mlflow.register_model(
-    model_uri=model_uri,
-    name=registered_name,
-)
 
-version = registered_model.version
-
-
-######
-
-
-```text
-Load data
-   ↓
-Preprocess
-   ↓
-Parent MLflow Run
-   ├── Initial run tags
-   ├── Environment
-   ├── Parameters
-   ├── Input dataset lineage
-   ├── Input artifact
-   │
-   ├── Inference
-   │
-   ├── Log output artifact
-   ├── Log model
-   ├── Validate
-   │
-   └── Register validated models
-          ├── parent_run_id
-          ├── dataset_version
-          └── validation_status
-                    ↓
-             Evaluation Run
-                    ├── evaluation_run_id
-                    ├── ground-truth artifacts
-                    ├── evaluate_product
-                    ├── quality labels
-                    ├── composite score
-                    ├── Champion
-                    └── Challenger
-                              ↓
-                 Update registered versions
-                    ├── evaluation_run_id
-                    ├── promotion_role
-                    ├── composite_score
-                    └── UC alias
-```
 
 
