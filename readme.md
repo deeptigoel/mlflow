@@ -1,1152 +1,683 @@
-Implemenetd :
+```python
+from datetime import datetime
+import time
 
-✅ MLflow integration is complete.
-✅ Parent and nested evaluation runs are implemented.
-✅ Model validation is implemented.
-✅ Model registration is implemented (Databricks + UC toggle).
-✅ Model version tags (source run ID, dataset version, etc.) are implemented.
-✅ promotion_utils.py has been created, but promotion logic is only partially implemented.
-✅ lineage_utils.py has been created, but lineage querying is largely pending.
-⏳ Champion/challenger selection is in progress (composite score).
-⏳ Unity Catalog-specific lineage will be enabled later using the existing toggle.
+import mlflow
+from mlflow import MlflowClient
 
-
-1. Design lineage data model and API contract (do this first)
-
-Purpose: Decide what a lineage query should return.
-
-You don't write much code here. You define a response model, for example:
-
-{
-  model_name,
-  registered_name,
-  version,
-  source_run_id,
-  evaluation_run_id,
-  dataset_version,
-  validation_status,
-  registration_status,
-  model_card,
-  metrics,
-  artifacts,
-  uc_lineage (optional)
-}
-
-This becomes the contract for both the notebook and the API.
-
-File:
-
-
-######
-
-
+from config import (
+    MLFLOW_ENABLED,
+    MAX_TOKENS_PER_CHUNK,
+    BATCH_SIZE,
+    MAX_LENGTH,
+    MIN_TOKENS,
+    PRODUCT_NAME,
+    THERAPEUTIC_AREA,
+    START_DATE,
+    END_DATE,
+    DATASET_VERSION,
+    USE_UNITY_CATALOG,
+    UC_CATALOG,
+    UC_SCHEMA,
 )
 
+from mlflow_utils import (
+    setup_experiment,
+    set_run_tags,
+    update_run_tags,
+    log_environment,
+    log_parameters,
+    log_artifact,
+    log_metrics,
+    log_eval_quality_tags,
+)
 
-            # ----------------------------
-            # Promotion Summary
-            # ----------------------------
+from data_loader import load_data, filter_data
+from preprocess import preprocess_df, combine_documents
+from summarizer import run_pipeline
+from io_utils import save_summary, get_output_path
 
-            print("Champion :", promotion_info["champion_model"])
-            print("Challenger :", promotion_info["challenger_model"])
+from validation import validate_model
+from register_model import register_model
+from evaluation import evaluate_product, add_quality_labels
+from promotion_utils import (
+    calculate_composite_score,
+    prepare_promotion_metadata,
+)
 
-            mlflow.set_tag(
-                "champion_model",
-                promotion_info["champion_model"],
+from model_card import log_model_card
+from model_utils import log_transformer_model
+from evaluation_utils import save_eval_metric
+
+
+def main():
+
+    start_time = time.time()
+
+    # ============================================================
+    # 1. LOAD DATA
+    # ============================================================
+
+    df = load_data(
+        file_path="input.xlsx",
+        sheet_name="Sheet1",
+        converters={
+            "PRODUCT": str,
+            "THERAPEUTIC_AREA": str,
+        },
+    )
+
+    df = filter_data(
+        df=df,
+        product_name=PRODUCT_NAME,
+        therapeutic_area=THERAPEUTIC_AREA,
+        start_date=START_DATE,
+        end_date=END_DATE,
+    )
+
+    df = preprocess_df(
+        df=df,
+        text_column="TEXT",
+    )
+
+    combined_text = combine_documents(df)
+
+    # ============================================================
+    # 2. DATASET VERSION
+    # ============================================================
+
+    dataset_version = (
+        f"{PRODUCT_NAME}_"
+        f"{THERAPEUTIC_AREA}_"
+        f"{START_DATE}_"
+        f"{END_DATE}"
+    )
+
+    # ============================================================
+    # 3. RUN WITHOUT MLFLOW
+    # ============================================================
+
+    if not MLFLOW_ENABLED:
+
+        summary_results, models = run_pipeline(
+            combined_text
+        )
+
+        output_file = get_output_path(
+            PRODUCT_NAME,
+            START_DATE,
+            END_DATE,
+        )
+
+        save_summary(
+            df,
+            summary_results,
+            output_file,
+        )
+
+        return summary_results
+
+    # ============================================================
+    # 4. MLFLOW SETUP
+    # ============================================================
+
+    mlflow.set_tracking_uri("Databricks")
+
+    if USE_UNITY_CATALOG:
+
+        experiment_name = (
+            f"{UC_CATALOG}."
+            f"{UC_SCHEMA}."
+            f"Summarization"
+        )
+
+    else:
+
+        experiment_name = (
+            f"/Users/{user_name}/Summarization"
+        )
+
+    setup_experiment(experiment_name)
+
+    run_name = (
+        f"Summarization_"
+        f"{datetime.now():%Y%m%d_%H%M%S}"
+    )
+
+    # ============================================================
+    # 5. PARENT / INFERENCE RUN
+    # ============================================================
+
+    with mlflow.start_run(run_name=run_name):
+
+        parent_run_id = (
+            mlflow.active_run().info.run_id
+        )
+
+        client = MlflowClient()
+
+        # --------------------------------------------------------
+        # Initial run tags
+        # --------------------------------------------------------
+
+        set_run_tags(
+            description="MLflow experiment",
+            product=PRODUCT_NAME,
+            run_type="inference",
+            run_scope="summarization_pipeline",
+            run_id=parent_run_id,
+            capability="abstractive summarization",
+            dataset_version=dataset_version,
+            git_sha="testing_git",
+        )
+
+        # --------------------------------------------------------
+        # Environment
+        # --------------------------------------------------------
+
+        log_environment()
+
+        # --------------------------------------------------------
+        # Parameters
+        # --------------------------------------------------------
+
+        log_parameters(
+            {
+                "chunk_size": MAX_TOKENS_PER_CHUNK,
+                "batch_size": BATCH_SIZE,
+                "max_length": MAX_LENGTH,
+                "min_tokens": MIN_TOKENS,
+                "num_documents": len(df),
+            }
+        )
+
+        # ========================================================
+        # 6. INFERENCE
+        # ========================================================
+
+        summary_results, models = run_pipeline(
+            combined_text
+        )
+
+        # ========================================================
+        # 7. SAVE SUMMARY
+        # ========================================================
+
+        output_file = get_output_path(
+            PRODUCT_NAME,
+            START_DATE,
+            END_DATE,
+        )
+
+        save_summary(
+            df,
+            summary_results,
+            output_file,
+        )
+
+        log_artifact(output_file)
+
+        # ========================================================
+        # 8. LOG MODEL ARTIFACTS
+        # ========================================================
+
+        registered_models = []
+
+        for model_name, model_pipeline in models.items():
+
+            # ----------------------------------------------------
+            # Log model
+            # ----------------------------------------------------
+
+            log_transformer_model(
+                model_name,
+                model_pipeline,
             )
 
-            if promotion_info["challenger_model"] is not None:
+            model_uri = (
+                f"runs:/{parent_run_id}/{model_name}"
+            )
 
-                mlflow.set_tag(
-                    "challenger_model",
-                    promotion_info["challenger_model"],
+            # ----------------------------------------------------
+            # Validation
+            # ----------------------------------------------------
+
+            validation_status = validate_model(
+                model_pipeline,
+            )
+
+            update_run_tags(
+                validation_status=(
+                    "passed"
+                    if validation_status
+                    else "failed"
+                )
+            )
+
+            # ----------------------------------------------------
+            # Register only validated models
+            # ----------------------------------------------------
+
+            if validation_status:
+
+                registered_info = register_model(
+                    model_uri=model_uri,
+                    run_id=parent_run_id,
+                    model_name=model_name,
+                    description=(
+                        "Abstractive summarization model"
+                    ),
+                    dataset_version=dataset_version,
+                    validation_status=validation_status,
                 )
 
-            mlflow.log_metric(
-                "champion_composite_score",
-                promotion_info["champion_score"],
+                registered_models.append(
+                    {
+                        "model_name": model_name,
+                        "registered_name": (
+                            registered_info[
+                                "registered_name"
+                            ]
+                        ),
+                        "version": (
+                            registered_info[
+                                "version"
+                            ]
+                        ),
+                    }
+                )
+
+                update_run_tags(
+                    registration_status="registered"
+                )
+
+            else:
+
+                update_run_tags(
+                    registration_status="skipped"
+                )
+
+        # --------------------------------------------------------
+        # If no model passed validation, stop promotion/evaluation
+        # --------------------------------------------------------
+
+        if not registered_models:
+
+            update_run_tags(
+                pipeline_status="failed",
+                failure_reason=(
+                    "No model passed validation"
+                ),
             )
 
-            if promotion_info["challenger_score"] is not None:
+            return False
+
+        # ========================================================
+        # 9. MODEL CARD
+        # ========================================================
+
+        log_model_card(
+            MODEL_CARD_FILE
+        )
+
+        # ========================================================
+        # 10. EVALUATION RUN
+        # ========================================================
+
+        with mlflow.start_run(
+            run_name="Evaluation",
+            nested=True,
+        ):
+
+            evaluation_run_id = (
+                mlflow.active_run().info.run_id
+            )
+
+            # ----------------------------------------------------
+            # Evaluation run tags
+            # ----------------------------------------------------
+
+            set_run_tags(
+                description="Evaluation Metrics",
+                product=PRODUCT_NAME,
+                run_type="evaluation",
+                run_scope="scoring",
+                run_id=parent_run_id,
+                parent_run_id=parent_run_id,
+                capability=(
+                    "abstractive summarization evaluation"
+                ),
+                dataset_version=dataset_version,
+                git_sha="testing_git",
+            )
+
+            update_run_tags(
+                evaluation_run_id=evaluation_run_id
+            )
+
+            # ====================================================
+            # 11. EVALUATE MODELS
+            # ====================================================
+
+            eval_results = evaluate_product(
+                PRODUCT_NAME,
+                GROUNDTRUTH_DIR,
+                output_file,
+                summary_column=SUMMARY_COLUMN_IN_GROUNDTRUTH,
+                summary_column_in_hf=SUMMARY_COLUMN_IN_HF_RESULT,
+                source_doc_column=SOURCE_DOC_COLUMN,
+            )
+
+            # ====================================================
+            # 12. ADD QUALITY LABELS
+            # ====================================================
+
+            eval_labels_df = add_quality_labels(
+                eval_results
+            )
+
+            # ====================================================
+            # 13. CALCULATE COMPOSITE SCORE
+            # ====================================================
+
+            eval_df_composite = (
+                calculate_composite_score(
+                    eval_labels_df
+                )
+            )
+
+            # ====================================================
+            # 14. PREPARE CHAMPION / CHALLENGER
+            # ====================================================
+
+            promotion_info = (
+                prepare_promotion_metadata(
+                    eval_df_composite
+                )
+            )
+
+            # ====================================================
+            # 15. PROMOTION SUMMARY
+            # ====================================================
+
+            champion = promotion_info.get(
+                "champion"
+            )
+
+            challenger = promotion_info.get(
+                "challenger"
+            )
+
+            champion_score = promotion_info.get(
+                "champion_score"
+            )
+
+            challenger_score = promotion_info.get(
+                "challenger_score"
+            )
+
+            print(
+                f"Champion: {champion}"
+            )
+
+            print(
+                f"Challenger: {challenger}"
+            )
+
+            # ----------------------------------------------------
+            # Evaluation-run tags
+            # ----------------------------------------------------
+
+            if champion:
+
+                update_run_tags(
+                    champion_model=champion
+                )
+
+            if challenger:
+
+                update_run_tags(
+                    challenger_model=challenger
+                )
+
+            update_run_tags(
+                promotion_status="completed"
+            )
+
+            # ----------------------------------------------------
+            # Evaluation-run metrics
+            # ----------------------------------------------------
+
+            if champion_score is not None:
+
+                mlflow.log_metric(
+                    "champion_composite_score",
+                    float(champion_score),
+                )
+
+            if challenger_score is not None:
 
                 mlflow.log_metric(
                     "challenger_composite_score",
-                    promotion_info["challenger_score"],
+                    float(challenger_score),
                 )
 
+            # ====================================================
+            # 16. SAVE EVALUATION OUTPUT
+            # ====================================================
 
-            for model in registered_models:
+            if eval_df_composite is not None:
 
-                alias = promotion_info["aliases"].get(
-                    model["model_name"],
-                    "",
+                eval_out_file = save_eval_metric(
+                    eval_df_composite,
+                    PRODUCT_NAME,
                 )
 
-                register_model_to_uc(
-                    run_id=parent_run_id,
-                    model_name=model["model_name"],
-                    catalog=UC_CATALOG,
-                    schema=UC_SCHEMA,
-                    alias=alias,
-                    ...
+                # ------------------------------------------------
+                # Log evaluation metrics / parameters
+                # ------------------------------------------------
+
+                row = (
+                    eval_df_composite
+                    .iloc[0]
+                    .to_dict()
                 )
 
+                metrics = {}
+                params = {}
 
+                for key, value in row.items():
 
-            
+                    try:
 
-    
+                        metrics[key] = float(value)
 
-lineage_utils.py (response object/dataclass)
-README or design notes
-2. Implement MLflow lineage resolver
+                    except (
+                        ValueError,
+                        TypeError,
+                    ):
+
+                        params[key] = str(value)
 
-This is the core implementation.
+                if metrics:
 
-Given:
+                    log_metrics(metrics)
 
-registered_model_name
-version
+                if params:
+
+                    log_eval_quality_tags(
+                        params
+                    )
+
+                log_artifact(
+                    eval_out_file
+                )
+
+                update_run_tags(
+                    evaluation_status="complete"
+                )
+
+            else:
 
-it should resolve:
-
-source run ID
-parent run
-evaluation run
-dataset version
-validation status
-metrics
-artifacts
-model card
-registered model information
-
-Initially this can use only MLflowClient.
-
-Later, if UC is enabled:
-
-augment with Unity Catalog lineage.
-
-File:
-
-lineage_utils.py
-
-Functions such as:
-
-resolve_lineage(...)
-get_model_version(...)
-get_source_run(...)
-get_evaluation_run(...)
-build_lineage(...)
-3. Expose lineage on API
-
-Once lineage_utils.py works:
-
-API becomes very thin.
-
-GET /lineage/{model}/{version}
-
-Internally:
-
-lineage_utils.resolve_lineage(...)
-
-returns JSON.
-
-If you're using FastAPI, this is just one endpoint.
-
-4. Notebook for ad hoc queries
-
-Very useful for debugging.
-
-Example:
-
-from lineage_utils import resolve_lineage
-
-resolve_lineage(
-    model="BioBART",
-    version=4
-)
-
-Returns a dataframe/dictionary.
-
-No API required.
-
-5. Documentation
-
-Document:
-
-request
-model
-version
-response
-source_run
-evaluation_run
-dataset_version
-metrics
-validation
-artifacts
-
-Also explain:
-
-Without UC
-↓
-
-MLflow lineage only
-
-With UC
-
-↓
-
-MLflow
-+
-Unity Catalog lineage
-Suggested implementation order
-✅ Finish promotion_utils.py (champion/challenger).
-✅ Finalize composite score.
-✅ Design the lineage response model.
-✅ Implement the MLflow lineage resolver in lineage_utils.py.
-✅ Create the notebook for testing lineage.
-✅ Add the API endpoint.
-
-
-
-#########################
-########################
-
-lineage data model is not the implementation—it's the contract of what your lineage service promises to return.
-
-Think of it this way:
-
-MLflow stores information in different places (runs, model versions, metrics, tags, artifacts).
-Your lineage resolver collects all of that.
-The JSON is simply the final combined view returned to the notebook/API.
-
-For your implementation, I'd proceed as follows.
-
-Step 1 — Design the lineage data model (No coding initially)
-
-This is the blueprint.
-
-Before writing any code, decide:
-
-"If somebody asks for model version 3, what information should I return?"
-
-Don't think about MLflow APIs yet.
-
-Think about the consumer.
-
-For example:
-
-Model
-│
-├── name
-├── version
-├── alias
-├── description
-├── registration_time
-│
-Run
-│
-├── source_run_id
-├── parent_run_id
-├── evaluation_run_id
-├── experiment_name
-│
-Dataset
-│
-├── dataset_version
-├── product
-├── therapeutic_area
-│
-Validation
-│
-├── validation_status
-├── validation_time
-│
-Metrics
-│
-├── ROUGE
-├── BLEU
-├── METEOR
-├── BERTScore
-├── Composite Score
-│
-Artifacts
-│
-├── model_card
-├── evaluation_report
-├── summary_output
-│
-Promotion
-│
-├── Champion
-├── Challenger
-├── Promotion decision
-│
-Unity Catalog
-│
-├── input tables
-├── output tables
-└── lineage graph
-
-
-
-It is not stored anywhere.
-
-You will build it.
-
-Step 2 — Identify where every field comes from
-
-This is the important exercise.
-
-For every field ask:
-
-Where does it live?
-
-Example:
-
-Field	Source
-model_name	Registered Model
-version	Registered Model
-alias	UC
-source_run_id	Model Version Tag
-evaluation_run_id	Run Tag
-validation_status	Run Tag
-dataset_version	Run Tag
-metrics	Evaluation Run
-model_card	Artifact
-summary	Artifact
-
-Once you know the source of every field,
-
-implementing the resolver becomes easy.
-
-Step 3 — Build the MLflow lineage resolver
-
-Now create functions.
-
-Instead of one huge function:
-
-resolve_lineage()
-
-break it into smaller helpers.
-
-Example:
-
-resolve_lineage()
-
-↓
-
-get_registered_model()
-
-↓
-
-get_source_run()
-
-↓
-
-get_evaluation_run()
-
-↓
-
-get_metrics()
-
-↓
-
-get_artifacts()
-
-↓
-
-combine_everything()
-
-Every helper has only one job.
-
-Step 4 — Combine everything
-
-Now create the final JSON.
-
-Suppose
-
-get_source_run()
-
-returns
-
-run_id
-dataset_version
-validation_status
-
-and
-
-get_metrics()
-
-returns
-
-ROUGE
-BLEU
-Composite
-
-Simply merge them.
-
-Final response becomes
-
-{
-   "model": {...},
-   "run": {...},
-   "dataset": {...},
-   "metrics": {...},
-   "artifacts": {...}
-}
-Step 5 — Notebook
-
-Notebook should simply do
-
-resolve_lineage(
-    model="BioBART",
-    version=4
-)
-
-and print the JSON.
-
-No FastAPI yet.
-
-Just ensure the resolver works.
-
-Step 6 — API
-
-Now the API becomes tiny.
-
-Instead of writing MLflow code again,
-
-the endpoint simply calls
-
-resolve_lineage()
-
-and returns the JSON.
-
-Step 7 — Unity Catalog
-
-This is why you already added the UC toggle.
-
-Current implementation
-
-resolve_lineage()
-
-↓
-
-MLflow
-
-Later
-
-resolve_lineage()
-
-↓
-
-MLflow
-
-↓
-
-if UC enabled
-
-↓
-
-UC System Tables
-
-↓
-
-append UC lineage
-
-No redesign required.
-
-Step 8 — Documentation
-
-Finally document
-
-Input
-
-model_name
-version
-
-Output
-
-Model
-
-↓
-
-Run
-
-↓
-
-Evaluation
-
-↓
-
-Artifacts
-
-↓
-
-Metrics
-
-↓
-
-Promotion
-
-↓
-
-UC lineage
-
-This becomes your API documentation.
-
-The order I would actually implement
-Finish composite score.
-Finish promotion_utils (Champion/Challenger).
-Design the lineage JSON contract.
-Create helper functions in lineage_utils.py.
-Build resolve_lineage().
-Test it in a notebook.
-Add the API endpoint.
-Extend it with Unity Catalog when UC is available.
-
-This sequence minimizes rework because each step builds on the previous one, and the API layer stays very thin by reusing the resolver.
-
-
-
-###############
-##############
-
-
-Suggested Lineage JSON Contract (Inference Pipeline)
-
-
-{
-  "model": {
-    "registered_name": "BioBART",
-    "version": 3,
-    "alias": "Champion",
-    "description": "Abstractive summarization model",
-    "registration_time": "...",
-    "validation_status": "Passed"
-  },
-
-  "pipeline": {
-    "source_run_id": "...",
-    "evaluation_run_id": "...",
-    "experiment_name": "...",
-    "run_type": "summarization",
-    "pipeline_version": "v1.0"
-  },
-
-  "dataset": {
-    "dataset_version": "...",
-    "product": "ABC",
-    "therapeutic_area": "Respiratory",
-    "start_date": "...",
-    "end_date": "...",
-    "documents_processed": 120
-  },
-
-  "inference": {
-    "model_name": "BioBART",
-    "chunk_size": 4000,
-    "max_tokens": 3000
-  },
-
-  "evaluation": {
-    "rouge1": 0.48,
-    "rouge2": 0.31,
-    "rougeL": 0.45,
-    "bleu": 0.28,
-    "meteor": 0.39,
-    "bert_score": 0.91,
-    "factual_consistency": 0.87,
-    "composite_score": 0.83
-  },
-
-  "promotion": {
-    "candidate": true,
-    "promotion_status": "Champion",
-    "promotion_reason": "Highest composite score"
-  },
-
-  "artifacts": {
-    "summary_file": "...",
-    "evaluation_report": "...",
-    "model_card": "..."
-  },
-
-  "unity_catalog": {
-    "enabled": false,
-    "lineage": null
-  }
-}
-
-
-Why this structure?
-
-It separates concerns:
-
-model → Registry information.
-pipeline → MLflow runs.
-dataset → What was summarized.
-inference → Configuration used.
-evaluation → Metrics.
-promotion → Champion/Challenger decision.
-artifacts → Files.
-unity_catalog → Future extension.
-
-
-2. What should go into promotion_utils.py?
-
-Think of promotion_utils.py as answering one question:
-
-"Given the evaluation results, which model should become Champion?"
-
-It should not know anything about inference or evaluation implementation. It should only work with the evaluation results.
-
-A good structure would be:
-
-promotion_utils.py
-
-├── calculate_composite_score()
-│
-├── rank_models()
-│
-├── select_champion()
-│
-├── select_challenger()
-│
-├── assign_aliases()
-│
-├── compare_with_existing_champion()   (later, when UC aliases are used)
-│
-└── promote_model()                    (later)
-Functions
-
-calculate_composite_score(df)
-
-Computes the weighted composite score for each model.
-Adds a composite_score column.
-
-rank_models(df)
-
-Sorts models by composite score (highest first).
-
-select_champion(df)
-
-Returns the top-ranked model.
-
-select_challenger(df)
-
-Returns the second-ranked model (if available).
-
-assign_aliases(champion, challenger)
-
-For now, simply returns:
-{
-    champion_model: "Champion",
-    challenger_model: "Challenger"
-}
-
-Later, when Unity Catalog aliases are enabled, this function can actually call:
-
-client.set_registered_model_alias(...)
-
-compare_with_existing_champion()
-
-Placeholder for the future.
-Once UC is available, compare the new model against the current Champion before changing aliases.
-Suggested flow
-Evaluation DataFrame
-        │
-        ▼
-calculate_composite_score()
-        │
-        ▼
-rank_models()
-        │
-        ▼
-select_champion()
-        │
-        ▼
-select_challenger()
-        │
-        ▼
-assign_aliases()
-        │
-        ▼
-register_model()
-
-This keeps the promotion logic isolated, reusable, and ready for the future UC alias implementation.
-
-
-#############
-
-#############
-
-
-Flow
-Evaluation DataFrame
-        │
-        ▼
-calculate_composite_score()
-        │
-        ▼
-rank_models()
-        │
-        ▼
-select_champion()
-        │
-        ▼
-select_challenger()
-        │
-        ▼
-assign_aliases()
-        │
-        ▼
-return promotion_result
-        │
-        ▼
-register_model(...)
-1. Rank Models
-def rank_models(eval_df):
-    """
-    Sort models based on composite score.
-    """
-
-    ranked_df = (
-        eval_df
-        .sort_values(
-            by="composite_score",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-    return ranked_df
-2. Select Champion
-def select_champion(ranked_df):
-    """
-    Select the best performing model.
-    """
-
-    if ranked_df.empty:
-        return None
-
-    return ranked_df.iloc[0]
-3. Select Challenger
-def select_challenger(ranked_df):
-    """
-    Select second best model.
-    """
-
-    if len(ranked_df) < 2:
-        return None
-
-    return ranked_df.iloc[1]
-4. Assign Aliases
-
-For now don't touch UC.
-
-Just decide aliases.
-
-def assign_aliases(
-    champion,
-    challenger,
-):
-    """
-    Prepare alias mapping.
-    """
-
-    aliases = {}
-
-    if champion is not None:
-
-        aliases[
-            champion["model_name"]
-        ] = "Champion"
-
-    if challenger is not None:
-
-        aliases[
-            challenger["model_name"]
-        ] = "Challenger"
-
-    return aliases
-5. Prepare Promotion Result
-
-This is the function your pipeline should consume.
-
-def prepare_promotion_result(
-    ranked_df,
-):
-    """
-    Prepare promotion information.
-    """
-
-    champion = select_champion(ranked_df)
-
-    challenger = select_challenger(ranked_df)
-
-    aliases = assign_aliases(
-        champion,
-        challenger,
-    )
-
-    return {
-
-        "ranked_models": ranked_df,
-
-        "champion": champion,
-
-        "challenger": challenger,
-
-        "aliases": aliases,
-    }
-Pipeline
-
-Then your pipeline becomes
-
-eval_df = calculate_composite_score(
-    eval_df,
-)
-
-ranked_df = rank_models(
-    eval_df,
-)
-
-promotion_result = prepare_promotion_result(
-    ranked_df,
-)
-
-Now, while registering:
-
-alias = promotion_result["aliases"].get(
-    model_name,
-    "",
-)
-
-register_model(
-    ...
-    alias=alias,
-)
-Why I prefer this design
-
-Notice that:
-
-Promotion utilities never call MLflow.
-Promotion utilities only make business decisions.
-Registration utilities handle MLflow registration.
-Later, when Unity Catalog aliases are enabled, you only need to extend register_model() to apply the alias—promotion_utils.py stays unchanged.
-
-This separation keeps each module focused on a single responsibility and makes the code easier to test
-
-
-
-#############
-
-#########
-
-Recomended archictouere wrt to UC
-
-
-evaluation.py
-        │
-        ▼
-promotion_utils.py
-        │
-        ▼
-Promotion Decision
-        │
-        ▼
-register_model.py
-        │
-        ├── if use_unity_catalog:
-        │       set_registered_model_alias(...)
-        │       (future: UC-specific logic)
-        │
-        └── else:
-                skip alias / use workspace logic
-
-Where should the UC toggle be?
-
-Only in code that actually interacts with MLflow/UC, for example:
-
-if use_unity_catalog:
-    client.set_registered_model_alias(...)
-else:
-    # Workspace Registry or no alias
-
-or later in lineage_utils.py:
-
-if use_unity_catalog:
-    # Query UC system tables
-else:
-    # Build lineage using MLflow only
-So your current flow should be
-Evaluation DataFrame
-        │
-        ▼
-promotion_utils
-        │
-        ▼
-Champion = BioBART
-Challenger = PEGASUS
-Aliases = {...}
-        │
-        ▼
-register_model(...)
-        │
-        ▼
-if use_unity_catalog:
-      apply aliases
-else:
-      skip
-
-
-This is production-ready because:
-
-promotion_utils.py contains pure business logic (easy to test).
-register_model.py contains registry-specific logic (UC toggle).
-lineage_utils.py contains lineage-specific logic (MLflow now, UC later).
-
-
-
-#########
-Subtask: Lineage Query Capability
-
-Include:
-
-Implement composite-score-based Champion/Challenger selection.
-Expose promotion metadata in the lineage response.
-Resolve registered model → source run → evaluation run.
-Return standardized lineage JSON (metrics, tags, artifacts, dataset version, promotion metadata).
-Subtask: UC Lineage Tags
-
-Include:
-
-Add Unity Catalog alias support (Champion/Challenger) behind the UC toggle.
-Add UC-specific lineage tags and metadata.
-Integrate Model Card metadata into lineage when available.
-Extend lineage with UC information once enabled.
-
-This way you don't need separate promotion subtasks. The promotion logic becomes part of Lineage Query Capability, while the UC-specific implementation (aliases, UC tags, future UC lineage) naturally belongs under UC Lineage Tags. This keeps the number of subtasks small and aligns with the existing story structure.
-
-While the other subtasks still remain the same, right? Like the one those were suggested by someone else. I hope anything is not kind of duplicating.
-
-Yes, that's correct. The original subtasks remain unchanged, and with the mapping we discussed there isn't any significant duplication.
-
-Here's the mapping:
-
-✅ Design lineage data model and API contract → Design only.
-✅ Implement MLflow lineage resolver → Build the resolver that gathers MLflow information.
-✅ Expose lineage through API → API layer only.
-✅ Notebook for ad hoc lineage exploration → Notebook/UI for testing and exploration.
-✅ Documentation of lineage and API integration → Documentation only.
-
-Then your additional subtasks fit naturally:
-
-✅ Lineage Query Capability → Composite score, Champion/Challenger selection, promotion metadata, and complete lineage response.
-✅ UC Lineage Tags → UC aliases, UC-specific tags, future UC lineage integration, and Model Card integration when available.
-
-So the responsibilities are distinct:
-
-The resolver fetches lineage.
-The query capability enriches it with promotion-related information.
-The UC lineage tags handle Unity Catalog-specific enhancements.
-
-That separation avoids overlap while keeping the work logically organized.
-
-
-Existing subtasks (keep these)
-1. Design lineage data model and API contract
-Design lineage JSON schema.
-Define API request/response contract.
-Document required MLflow tags, parameters, and inputs.
-Keep placeholders for UC lineage and promotion metadata.
-2. Implement MLflow lineage resolver
-Resolve registered model → source run → evaluation run.
-Retrieve tags, parameters, metrics, artifacts, dataset version.
-Return standardized lineage JSON.
-Add UC support behind a toggle (future).
-3. Expose lineage through API
-Add lineage API endpoint.
-Integrate with lineage resolver.
-Return appropriate responses and error handling.
-4. Notebook for ad hoc lineage exploration
-Query lineage using the resolver.
-Display run metadata, dataset version, metrics, artifacts.
-Validate lineage output.
-5. Documentation of lineage and API integration
-Document lineage architecture.
-Document API usage.
-Document MLflow + UC integration flow.
-Additional subtasks for your story
-6. Champion–Challenger Promotion Framework
-Compute composite score.
-Rank evaluated models.
-Select Champion and Challenger.
-Prepare promotion metadata for registration.
-7. UC Alias & Model Card Integration (clubbed)
-Integrate Champion/Challenger aliases with UC (behind toggle).
-Generate and log Model Card.
-Surface alias and Model Card in lineage response.
-
-
-
-      
-
-
-
-
-#######
-✅ Enhance with Unity Catalog lineage when UC is enabled.
-
-This order lets you complete everything that depends only on MLflow now, while keeping the UC integration as a straightforward extension later.
-
-
-
-
-#########
-
-
-import pandas as pd
-
-
-def calculate_composite_score(eval_df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Calculate weighted composite score.
-    Assumes composite_score column is added.
-    """
-
-    # Already implemented by you.
-    return eval_df
-
-
-def _rank_models(
-    eval_df: pd.DataFrame,
-) -> pd.DataFrame:
-
-    ranked_df = (
-        eval_df
-        .sort_values(
-            by="composite_score",
-            ascending=False,
-        )
-        .reset_index(drop=True)
-    )
-
-    ranked_df["rank"] = ranked_df.index + 1
-
-    return ranked_df
-
-
-def _select_champion(
-    ranked_df: pd.DataFrame,
-):
-
-    if ranked_df.empty:
-        return None
-
-    return ranked_df.iloc[0].to_dict()
-
-
-def _select_challenger(
-    ranked_df: pd.DataFrame,
-):
-
-    if len(ranked_df) < 2:
-        return None
-
-    return ranked_df.iloc[1].to_dict()
-
-
-def _prepare_alias_mapping(
-    champion,
-    challenger,
-):
-
-    alias_mapping = {}
-
-    if champion:
-
-        alias_mapping[
-            champion["model_name"]
-        ] = "Champion"
-
-    if challenger:
-
-        alias_mapping[
-            challenger["model_name"]
-        ] = "Challenger"
-
-    return alias_mapping
-
-
-def prepare_promotion_metadata(
-    eval_df: pd.DataFrame,
-) -> dict:
-    """
-    Main promotion function.
-
-    Returns
-    -------
-    {
-        "ranked_models": dataframe,
-        "champion": {...},
-        "challenger": {...},
-        "aliases": {...}
-    }
-    """
-
-    ranked_df = _rank_models(eval_df)
-
-    champion = _select_champion(ranked_df)
-
-    challenger = _select_challenger(ranked_df)
-
-    aliases = _prepare_alias_mapping(
-        champion,
-        challenger,
-    )
-
-    return {
-
-        "ranked_models": ranked_df,
-
-        "champion": champion,
-
-        "challenger": challenger,
-
-        "aliases": aliases,
-    }
-
-
-######
-
-
-evaluate_product()
-        │
-        ▼
-evaluation_df
-        │
-        ▼
-add_quality_labels()
-        │
-        ▼
-evaluation_labels_df
-        │
-        ▼
-calculate_composite_score()
-        │
-        ▼
-evaluation_df (with composite_score)
-        │
-        ▼
-prepare_promotion_metadata()
-        │
-        ▼
-promotion_info
-        │
-        ▼
-Register each model using its alias
-        │
-        ▼
-Log promotion metadata
+                update_run_tags(
+                    evaluation_status="failed",
+                    promotion_status="failed",
+                )
+
+                return False
+
+            # ====================================================
+            # 17. LINK EVALUATION TO REGISTERED MODEL VERSIONS
+            # ====================================================
+
+            for registered_model in registered_models:
+
+                model_name = (
+                    registered_model[
+                        "model_name"
+                    ]
+                )
+
+                registered_name = (
+                    registered_model[
+                        "registered_name"
+                    ]
+                )
+
+                version = (
+                    registered_model[
+                        "version"
+                    ]
+                )
+
+                # ------------------------------------------------
+                # Evaluation run ID
+                # ------------------------------------------------
+
+                client.set_model_version_tag(
+                    name=registered_name,
+                    version=version,
+                    key="evaluation_run_id",
+                    value=evaluation_run_id,
+                )
+
+                # ------------------------------------------------
+                # Parent run ID
+                # ------------------------------------------------
+
+                client.set_model_version_tag(
+                    name=registered_name,
+                    version=version,
+                    key="parent_run_id",
+                    value=parent_run_id,
+                )
+
+                # ------------------------------------------------
+                # Dataset version
+                # ------------------------------------------------
+
+                client.set_model_version_tag(
+                    name=registered_name,
+                    version=version,
+                    key="dataset_version",
+                    value=dataset_version,
+                )
+
+                # ------------------------------------------------
+                # Get promotion role
+                # ------------------------------------------------
+
+                promotion_role = (
+                    promotion_info[
+                        "aliases"
+                    ].get(model_name)
+                )
+
+                # ------------------------------------------------
+                # Store promotion role
+                # ------------------------------------------------
+
+                if promotion_role:
+
+                    client.set_model_version_tag(
+                        name=registered_name,
+                        version=version,
+                        key="promotion_role",
+                        value=promotion_role,
+                    )
+
+                # ------------------------------------------------
+                # Store composite score
+                # ------------------------------------------------
+
+                model_rows = eval_df_composite[
+                    eval_df_composite[
+                        "model_name"
+                    ] == model_name
+                ]
+
+                if not model_rows.empty:
+
+                    composite_score = float(
+                        model_rows[
+                            "composite_score"
+                        ].iloc[0]
+                    )
+
+                    client.set_model_version_tag(
+                        name=registered_name,
+                        version=version,
+                        key="composite_score",
+                        value=str(
+                            composite_score
+                        ),
+                    )
+
+                    # ------------------------------------------------
+                    # UC alias
+                    # ------------------------------------------------
+
+                    if (
+                        USE_UNITY_CATALOG
+                        and promotion_role
+                    ):
+
+                        client.set_registered_model_alias(
+                            name=registered_name,
+                            alias=promotion_role,
+                            version=version,
+                        )
+
+            # ====================================================
+            # 18. FINAL PIPELINE STATUS
+            # ====================================================
+
+            execution_time = (
+                time.time() - start_time
+            )
+
+            mlflow.log_metric(
+                "execution_time_seconds",
+                execution_time,
+            )
+
+            mlflow.log_metric(
+                "documents_processed",
+                len(df),
+            )
+
+            mlflow.log_metric(
+                "summaries_generated",
+                len(summary_results),
+            )
+
+            update_run_tags(
+                pipeline_status="completed"
+            )
+
+    return True
+
+
+if __name__ == "__main__":
+    main()
+```
