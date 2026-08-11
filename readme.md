@@ -1,161 +1,42 @@
-from typing import Optional
-
-import mlflow
-
-
-def set_source_lineage_tags(
-    source_delta_table_version: Optional[str] = None,
-    source_file_type: Optional[str] = None,
-    source_path: Optional[str] = None,
-    silver_table_name: Optional[str] = None,
-    uc_catalog: Optional[str] = None,
-    uc_schema: Optional[str] = None,
-    workspace_schema: Optional[str] = None,
-) -> None:
-    """
-    Set MLflow source-lineage tags for Delta-table or file-based inputs.
-
-    Delta sources:
-        - source_type
-        - source_delta_table_name
-        - source_delta_table_version
-        - source_table_catalog
-        - source_table_schema
-        - source_table_full_name
-
-    File sources:
-        - source_type
-        - source_path
-
-    Args:
-        source_delta_table_version:
-            Version of the source Delta table. If provided, the source
-            is treated as a Delta source.
-
-        source_file_type:
-            File type such as 'csv' or 'excel'. Used when the source
-            is not a Delta table.
-
-        source_path:
-            Path to the source file for CSV/Excel inputs.
-
-        silver_table_name:
-            Name of the Silver Delta table.
-
-        uc_catalog:
-            Unity Catalog catalog name, when applicable.
-
-        uc_schema:
-            Unity Catalog schema name, when applicable.
-
-        workspace_schema:
-            Workspace/schema name used when Unity Catalog is not applicable.
-    """
-
-    tags = {}
-
-    # ---------------------------------------------------------
-    # Delta source
-    # ---------------------------------------------------------
-    if source_delta_table_version is not None:
-
-        if not silver_table_name:
-            raise ValueError(
-                "silver_table_name is required for a Delta source."
-            )
-
-        tags.update(
-            {
-                "source_type": "delta",
-                "source_delta_table_name": silver_table_name,
-                "source_delta_table_version": str(
-                    source_delta_table_version
-                ),
-            }
-        )
-
-        # Unity Catalog
-        if uc_catalog and uc_schema:
-
-            tags.update(
-                {
-                    "source_table_catalog": uc_catalog,
-                    "source_table_schema": uc_schema,
-                    "source_table_full_name": (
-                        f"{uc_catalog}."
-                        f"{uc_schema}."
-                        f"{silver_table_name}"
-                    ),
-                }
-            )
-
-        # Non-UC workspace/schema
-        elif workspace_schema:
-
-            tags.update(
-                {
-                    "source_table_schema": workspace_schema,
-                    "source_table_full_name": (
-                        f"{workspace_schema}."
-                        f"{silver_table_name}"
-                    ),
-                }
-            )
-
-        # No catalog/schema information
-        else:
-
-            tags["source_table_full_name"] = silver_table_name
-
-    # ---------------------------------------------------------
-    # File source - CSV / Excel
-    # ---------------------------------------------------------
-    elif source_file_type:
-
-        if not source_path:
-            raise ValueError(
-                "source_path is required for a file-based source."
-            )
-
-        file_type = source_file_type.lower().strip()
-
-        if file_type in {"xlsx", "xls", "excel"}:
-            normalized_type = "excel"
-
-        elif file_type == "csv":
-            normalized_type = "csv"
-
-        else:
-            normalized_type = file_type
-
-        tags.update(
-            {
-                "source_type": normalized_type,
-                "source_path": str(source_path),
-            }
-        )
-
-    # ---------------------------------------------------------
-    # Invalid / missing source information
-    # ---------------------------------------------------------
-    else:
-        raise ValueError(
-            "Either source_delta_table_version or "
-            "source_file_type must be provided."
-        )
-
-    # ---------------------------------------------------------
-    # Set all generated tags on the active MLflow run
-    # ---------------------------------------------------------
-    mlflow.set_tags(tags)
-
-set_source_lineage_tags(
-    source_delta_table_version=SOURCE_DELTA_TABLE_VERSION,
-    source_file_type=SOURCE_FILE_TYPE,
-    source_path=INPUT_FILE_PATH,
-    silver_table_name=SILVER_TABLE_NAME,
-)
+| Tag                   | Example value                           | Set on              | Purpose                                 |
+| --------------------- | --------------------------------------- | ------------------- | --------------------------------------- |
+| `run_type`            | `inference` / `evaluation`              | Run                 | Identifies execution type               |
+| `run_scope`           | `summarization_pipeline` / `scoring`    | Run                 | Identifies pipeline scope               |
+| `capability`          | `abstractive summarization`             | Run                 | ML capability                           |
+| `product`             | `ABC`                                   | Run                 | Product being processed                 |
+| `dataset_version`     | `ABC_Respiratory_2025-01-01_2025-12-31` | Run                 | Input dataset/version identifier        |
+| `git_sha`             | `<commit_sha>`                          | Run                 | Code version/reproducibility            |
+| `parent_run_id`       | `<inference_run_id>`                    | Model version       | Links registered model to inference run |
+| `validation_status`   | `passed` / `failed`                     | Model version       | Model validation result                 |
+| `registration_status` | `registered` / `skipped`                | Run                 | Registration outcome                    |
+| `model_name`          | `model_a` / `model_b`                   | Run                 | Models produced by inference            |
+| `number_of_model`     | `2`                                     | Run                 | Number of generated models              |
+| `evaluation_run_id`   | `<evaluation_run_id>`                   | Run + Model version | Links evaluation to model               |
+| `promotion_role`      | `champion` / `challenger`               | Model version       | Promotion assignment                    |
+| `composite_score`     | `0.87`                                  | Model version       | Final promotion score                   |
+| `champion_model`      | `model_a`                               | Evaluation run      | Selected champion                       |
+| `challenger_model`    | `model_b`                               | Evaluation run      | Selected challenger                     |
+| `promotion_status`    | `completed` / `failed`                  | Evaluation run      | Promotion outcome                       |
+| `evaluation_status`   | `complete` / `failed`                   | Evaluation run      | Evaluation outcome                      |
+| `pipeline_status`     | `completed` / `failed`                  | Run                 | Overall pipeline status                 |
+| `failure_reason`      | `No model passed validation`            | Run                 | Failure explanation                     |
 
 
+
+| Tag                          | Example value                               | Purpose                    |
+| ---------------------------- | ------------------------------------------- | -------------------------- |
+| `source_type`                | `delta` / `csv` / `excel`                   | Identifies source type     |
+| `source_delta_table_name`    | `silver_summarization`                      | Source Delta table         |
+| `source_delta_table_version` | `125`                                       | Exact Delta version        |
+| `source_table_catalog`       | `my_catalog`                                | UC catalog                 |
+| `source_table_schema`        | `my_schema`                                 | UC/workspace schema        |
+| `source_table_full_name`     | `my_catalog.my_schema.silver_summarization` | Fully qualified source     |
+| `source_path`                | `input.xlsx`                                | File-based source location |
+
+
+| Tag                 | Example value                |
+| ------------------- | ---------------------------- |
+| `model_card_status` | `generated`                  |
+| `model_card_path`   | `model_card/model_card.json` |
 
 
