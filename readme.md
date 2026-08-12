@@ -1,26 +1,41 @@
- model_card = build_model_card(
-        model_name=model_name,
-        registered_name=registered_name,
-        model_version=version,
-        parent_run_id=parent_run_id,
-        evaluation_run_id=child_run_id,
-        validation_status="passed",
-        dataset_version=dataset_version,
-        evaluation_metrics=evaluation_metrics,
-        promotion_role=promotion_role,
-        composite_score=composite_score,
-    )
+def log_transformer_model(
+    model_name,
+    model_pipeline,
+):
+    """
+    Log a Hugging Face/Transformer model to MLflow.
+    """
 
-    card_paths = save_model_card(
-        model_card,
-        output_dir=f"/tmp/model_cards/{model_name}_{version}",
-    )
+    try:
+        mlflow.transformers.log_model(
+            transformers_model=model_pipeline,
+            artifact_path=model_name,
+        )
 
-    log_model_card(card_paths)
+        logger.info(
+            "Successfully logged transformer model: %s",
+            model_name,
+        )
 
-    tag_model_version_with_card(
-        client=client,
-        registered_name=registered_name,
-        version=version,
-        model_card_path="model_card/model_card.json",
-    )
+        return True
+
+    except Exception as e:
+
+        logger.exception(
+            "Failed to log transformer model '%s': %s",
+            model_name,
+            str(e),
+        )
+
+        # Optional MLflow tag
+        mlflow.set_tag(
+            "model_logging_status",
+            "failed",
+        )
+
+        mlflow.set_tag(
+            "model_logging_error",
+            str(e),
+        )
+
+        return False
