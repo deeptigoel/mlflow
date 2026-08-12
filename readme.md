@@ -1,41 +1,63 @@
-temp_load_models() — add try/except because this is where the actual pretrained-model deserialization failure occurs. Log the specific model name and re-raise so the pipeline stops cleanly.
-log_transformer_model() — keep your existing try/except to capture MLflow model-logging failures separately.
+from typing import Any, Dict, Optional
 
-You don't need special handling for the downstream model variable error; treat it as a consequence of the failed model deserialization.
-
-Suggested log/comment:
-
-Investigated model deserialization failures. safetensors HeaderTooSmall occurs during pretrained-model loading; the subsequent local model error is downstream. Added exception handling during model loading and MLflow logging to capture the failing model and terminate safely.
+import mlflow
 
 
+def configure_mlflow() -> Dict[str, Any]:
+    """
+    Configure MLflow tracking, registry, and experiment settings.
 
-def temp_load_models():
+    Centralizes MLflow configuration so the pipeline does not directly
+    manage tracking URIs, registry URIs, or experiment setup.
 
-    models = {}
 
-    for model_alias, hf_model_name in MODEL_NAMES.items():
+    Returns
+    -------
+    Dict[str, Any]
+        Configuration details containing the experiment name,
+        tracking URI, registry URI, and Unity Catalog flag.
 
-        try:
-            logger.info(
-                "Loading model: %s",
-                hf_model_name,
-            )
+    Raises
+    ------
+    ValueError
+        If experiment_name is empty or invalid.
 
-            model_pipeline = pipeline(
-                "summarization",
-                model=hf_model_name,
-            )
+    RuntimeError
+        If MLflow configuration fails.
+    """
 
-            models[model_alias] = model_pipeline
+    try:
+        # ---------------------------------
+        # Tracking configuration
+        # ---------------------------------
 
-        except Exception:
+       
+        mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
 
-            logger.exception(
-                "Failed to load model '%s' (%s)",
-                model_alias,
-                hf_model_name,
-            )
+        # ---------------------------------
+        # Registry configuration
+        # ---------------------------------
 
-            raise
+        if USE_UNITY_CATALOG:
+            mlflow.set_registry_uri(MLFLOW_REGISTRY_UC_URI)
 
-    return models
+        elif use_unity_catalog:
+            mlflow.set_registry_uri("databricks-uc")
+
+        # ---------------------------------
+        # Experiment configuration
+        # ---------------------------------
+
+        setup_experiment(experiment_name)
+
+        return {
+            "experiment_name": MLFLOW_EXPERIMENT_NAME,
+            "tracking_uri": mlflow.get_tracking_uri(),
+            "registry_uri": mlflow.get_registry_uri(),
+            "use_unity_catalog": USE_UNITY_CATALOG,
+        }
+
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to configure MLflow."
+        ) from exc
