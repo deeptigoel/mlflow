@@ -1,287 +1,133 @@
-PR Title
+1. End-to-end testing
 
-Enhance MLflow Lineage, Evaluation Logging and Model Card Automation
+In your notebook, you can have a subsection:
 
-Summary
+End-to-End Testing
 
-This PR enhances the summarization pipeline with centralized MLflow configuration, source/data lineage tracking, evaluation metadata logging, model-version tagging, and automated model-card generation.
+Execute the complete pipeline once.
+Verify successful flow: evaluation → composite scoring → promotion → model registration → model-card generation.
+Verify traceability in the MLflow UI.
+2. Registered model & traceability verification
 
-The changes are intended to improve traceability, reproducibility, model governance, and reviewability across inference, evaluation, and model-promotion workflows.
+Then add a separate cell to inspect the existing registered model:
 
-Changes Included
-1. Centralized MLflow Configuration
+import mlflow
+from mlflow import MlflowClient
 
-Introduced configure_mlflow() in mlflow_utils.py to centralize MLflow setup.
 
-Function:
+client = MlflowClient()
 
-configure_mlflow()
 
-The function is responsible for configuring:
+registered_name = "YOUR_REGISTERED_MODEL_NAME"
+version = "YOUR_MODEL_VERSION"
 
-MLFLOW_TRACKING_URI
-MLFLOW_REGISTRY_URI
-MLflow experiment
-Unity Catalog/non-Unity Catalog configuration
 
-These values are now intended to come from config.py rather than being hard-coded in the pipeline.
-
-Reviewer note:
-Please verify that environment-specific tracking/registry URIs and experiment names are correctly maintained in configuration rather than pipeline code.
-
-2. Source Lineage Tagging
-
-Added centralized source lineage handling through:
-
-set_source_lineage_tags()
-
-The function captures source-specific metadata such as:
-
-Source file type
-Source path
-Delta table/version information where applicable
-Catalog/schema/table information for UC-based sources
-
-This provides a consistent mechanism for tracking where inference data originated.
-
-Reviewer note:
-Please verify that the lineage tags are sufficient for both current file-based ingestion and future Delta/Unity Catalog sources.
-
-3. Input Dataset Logging
-
-Added MLflow dataset tracking using:
-
-mlflow.data.from_pandas()
-mlflow.log_input()
-
-The inference dataset is now associated with the MLflow run using an explicit context:
-
-context="inference"
-
-The original input file is also logged as an artifact under:
-
-input/
-
-This allows reviewers to distinguish between the MLflow dataset reference and the actual input artifact.
-
-4. Ground Truth / Evaluation Data Logging
-
-Evaluation-related data is logged separately under:
-
-groundtruth/
-
-The evaluation run is created as a nested MLflow run:
-
-mlflow.start_run(
-    run_name="Evaluation",
-    nested=True
+# Retrieve model version
+model_version = client.get_model_version(
+    name=registered_name,
+    version=version,
 )
 
-The evaluation run captures:
 
-Evaluation run ID
-Evaluation outputs
-Evaluation metrics
-Evaluation parameters
-Promotion metadata
+print("Model:", registered_name)
+print("Version:", version)
+print("Source:", model_version.source)
+print("Run ID:", model_version.run_id)
 
-Reviewer note:
-Human/reference summaries are evaluation inputs and should not automatically become model-card metrics. They are excluded from model-card metadata where appropriate.
 
-5. Evaluation Metrics and Parameters
+# Retrieve model-version tags
+print("\nModel Version Tags:")
+for k, v in model_version.tags.items():
+    print(f"{k}: {v}")
+3. Retrieve the evaluation run
+evaluation_run_id = model_version.tags.get("evaluation_run_id")
 
-Evaluation results are now converted into model-specific metrics and parameters.
 
-The important change is that metrics/parameters are extracted inside the registered-model loop, after filtering:
+evaluation_run = client.get_run(evaluation_run_id)
 
-model_rows = eval_df_composite[
-    eval_df_composite["model_name"] == model_name
-]
 
-This ensures that each model receives its own:
+print("Evaluation Run ID:", evaluation_run.info.run_id)
 
-eval_metrics
-eval_parameters
 
-rather than accidentally reusing metrics from another model.
+print("\nMetrics:")
+for k, v in evaluation_run.data.metrics.items():
+    print(f"{k}: {v}")
 
-Excluded fields include:
 
-EXCLUDE_FROM_MODEL_CARD = {
-    "human_summary",
-    "ground_truth_summary",
-    "reference_summary",
-}
+print("\nParameters:")
+for k, v in evaluation_run.data.params.items():
+    print(f"{k}: {v}")
 
-Reviewer note:
-Please specifically review this section because multiple models are evaluated in the same evaluation run. Model-specific filtering prevents cross-model metric contamination.
 
-6. Model Logging with Error Handling
+print("\nTags:")
+for k, v in evaluation_run.data.tags.items():
+    print(f"{k}: {v}")
+4. Check logged artifacts
+artifacts = client.list_artifacts(evaluation_run_id)
 
-Transformer models are logged using:
 
-log_transformer_model()
-
-The function wraps:
-
-mlflow.transformers.log_model()
-
-in exception handling to capture model serialization/deserialization failures.
-
-The pipeline checks the returned status:
-
-model_logged = log_transformer_model(
-    model_name,
-    model_pipeline,
-)
-
-if not model_logged:
-    update_run_tags(
-        pipeline_status="failed",
+print("Evaluation artifacts:")
+for artifact in artifacts:
+    print(
+        artifact.path,
+        artifact.file_size,
     )
-    return False
 
-This prevents the pipeline from continuing to model registration when model logging has failed.
+For nested artifact folders:
 
-Reviewer note:
-Please verify that model-registration logic never proceeds with an invalid/incompletely logged model artifact.
-
-7. Model Validation and Registration
-
-Each successfully logged model is validated before registration:
-
-validate_model()
-
-Models passing validation are registered using:
-
-register_model()
-
-The registered-model metadata includes:
-
-Model name
-Registered model name
-Version
-Dataset version
-Registration status
-8. Model-Version Evaluation and Promotion Tags
-
-Each registered model version is linked back to the evaluation run using:
-
-evaluation_run_id
-
-Additional model-version tags include:
-
-promotion_role
-composite_score
-
-For Unity Catalog, the appropriate promotion alias is also assigned.
-
-This creates a traceability chain:
-
-Dataset → Parent Run → Evaluation Run → Model Version → Promotion Role → Model Card
-
-9. Automated Model Card Generation
-
-Model cards are now generated programmatically using:
-
-build_model_card()
-
-The model card receives:
-
-Model name
-Registered model name
-Model version
-Parent run ID
-Evaluation run ID
-Validation status
-Dataset version
-Model-specific evaluation metrics
-Evaluation parameters
-Promotion role
-Composite score
-
-The generated card is then persisted using:
-
-save_model_card()
-
-and logged using:
-
-log_model_card()
-
-Finally, the model version is tagged with the model-card location using:
-
-tag_model_version_with_card()
-Overall Traceability
-
-The intended flow after these changes is:
-
-Input Dataset
-     ↓
-Source Lineage
-     ↓
-Parent MLflow Run
-     ↓
-Inference
-     ↓
-Logged Transformer Models
-     ↓
-Validation
-     ↓
-Registered Model Version
-     ↓
-Evaluation Run
-     ↓
-Model-specific Metrics/Parameters
-     ↓
-Champion / Challenger
-     ↓
-Model Version Tags / UC Alias
-     ↓
-Automated Model Card
-Reviewer Focus Areas
-
-I would specifically ask reviewers to look at these areas:
-
-configure_mlflow()
-Confirm tracking URI, registry URI and experiment configuration are fully centralized in config.py.
-set_source_lineage_tags()
-Confirm the lineage tags correctly support both file-based and future Delta/UC sources.
-Model-specific evaluation extraction
-Verify metrics and parameters are refreshed for every model and are not accidentally reused between models.
-log_transformer_model() error handling
-Verify serialization/deserialization failures correctly stop downstream registration.
-Model-version tags and promotion aliases
-Confirm champion/challenger roles and composite scores correspond to the correct model version.
-Model-card generation
-Verify that the model card contains only the relevant model's evaluation metrics/parameters and does not include raw human/reference summaries unnecessarily.
-MLflow artifact organization
-Confirm input, ground truth, evaluation output, model artifacts, and model cards have clear and non-overlapping artifact paths.
-PR Note
-
-Testing: Pipeline execution was validated across multiple models, with particular attention to model-specific evaluation metrics, MLflow lineage, model logging, registration, promotion metadata, and model-card generation.
-
-Yes. Based on your current code, pipeline("summarization", model=hf_model_name) uses the Hugging Face Transformers loading mechanism, which normally downloads the model into the Hugging Face cache if it isn't already cached.
-
-Your pipeline itself is not explicitly specifying a cache directory such as cache_dir=....
-
-So effectively:
-
-pipeline(
-    "summarization",
-    model=hf_model_name
+eval_artifacts = client.list_artifacts(
+    evaluation_run_id,
+    path="eval_output",
 )
 
-→ checks Hugging Face cache
-→ downloads missing model files/checkpoint shards
-→ loads the model from the local cache.
 
-Today 10:25 AM
-I want to add one statement in not more than 20 to 30 words, you know, as discussed actually, XYZ, actually the manager name, she will be adding, you know, she has a solution to the failure which I was getting, which was regarding the run. So, which would get added. So I just want to mention that, though currently I have added those try except things, but yeah, I mean, that is something that needs to be updated. How to say this in not more than 30 words?
+for artifact in eval_artifacts:
+    print(artifact.path, artifact.file_size)
+5. Verify the model can actually be loaded
 
-As discussed, XYZ will add the proposed solution for the run-related failure; the current try-except handling will be updated accordingly once incorporated.
+This is particularly useful given the previous deserialization issue:
 
-Actually, PR accepted, other things have been updated, but she has, you know, a script that would, that handles actually because these were two different things. One was a load transformer model that was happening and other being the log thing, so which was mentioned. Yeah, so those things I want to mention in the PR.
+model_uri = f"models:/{registered_name}/{version}"
 
-You can add this PR note:
 
-Run-related failure handling: The load_transformer_model and MLflow logging failures were separate issues. The current try-except handling is in place, while XYZ’s script-based solution for the run-related failure will be incorporated separately.
+loaded_model = mlflow.transformers.load_model(
+    model_uri
+)
+
+
+print("Model loaded successfully:", type(loaded_model))
+
+If you're using UC aliases:
+
+model_uri = f"models:/{registered_name}@Champion"
+6. Verify the model card
+
+If the model card is logged under the evaluation run:
+
+card_artifacts = client.list_artifacts(
+    evaluation_run_id,
+    path="model_card",
+)
+
+
+for artifact in card_artifacts:
+    print(artifact.path, artifact.file_size)
+Suggested PR testing section
+
+I would structure it as:
+
+Testing Performed
+
+1. End-to-End Testing
+
+Performed end-to-end testing of the pipeline from evaluation through model registration, promotion, and model-card generation.
+Verified end-to-end traceability across evaluation metrics, composite scores, promotion roles, registered model versions, and model cards.
+
+2. MLflow Verification
+
+Verified experiment, parent/nested runs, tags, parameters, metrics, and artifacts in the MLflow UI.
+Verified registered model/version metadata and promotion aliases.
+Verified the registered model can be loaded successfully without rerunning evaluation.
+Verified evaluation outputs, model artifacts, and model-card artifacts are present and non-empty.
+
+This is stronger than simply saying “verified in UI” because you're programmatically validating the persisted MLflow state as well as visually checking it.
