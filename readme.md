@@ -1,203 +1,264 @@
-You're right. Promotion and composite scoring should be the first/primary change, because that is the core of the evaluation → champion/challenger → model-version governance flow.
-
 PR Title
 
-Implement Model Evaluation, Composite Scoring, Promotion and Model Card Automation
+Enhance MLflow Lineage, Evaluation Logging and Model Card Automation
 
-PR Summary
+Summary
 
-This PR enhances the MLflow-based summarization pipeline to support model evaluation, composite scoring, champion/challenger promotion, model-version lineage, centralized MLflow configuration, and automated model-card generation.
+This PR enhances the summarization pipeline with centralized MLflow configuration, source/data lineage tracking, evaluation metadata logging, model-version tagging, and automated model-card generation.
 
-1. Model Evaluation, Composite Scoring & Promotion
+The changes are intended to improve traceability, reproducibility, model governance, and reviewability across inference, evaluation, and model-promotion workflows.
 
-Implemented the evaluation and promotion workflow to compare multiple candidate models and determine their respective roles.
+Changes Included
+1. Centralized MLflow Configuration
 
-Functions involved:
+Introduced configure_mlflow() in mlflow_utils.py to centralize MLflow setup.
 
-evaluate_product()
-add_quality_labels()
-calculate_composite_score()
-prepare_promotion_metadata()
-
-The workflow:
-
-Evaluates each candidate summarization model.
-Calculates individual evaluation metrics such as ROUGE/BERTScore and other quality measures.
-Applies quality labels where required.
-Calculates a composite score for each model.
-Compares candidate models using the composite score.
-Determines Champion and Challenger models.
-Stores the corresponding promotion metadata.
-
-The promotion information is also reflected in MLflow through:
-
-champion_model
-challenger_model
-champion_composite_score
-challenger_composite_score
-promotion_status
-
-Reviewer focus:
-Please verify the composite-score calculation, model comparison logic, and Champion/Challenger assignment, particularly when multiple models are evaluated in the same run.
-
-2. Model-Version Promotion & UC Aliases
-
-Each registered model version is linked with its evaluation and promotion information.
-
-Model-version tags include:
-
-evaluation_run_id
-promotion_role
-composite_score
-
-For Unity Catalog, the corresponding promotion role is also assigned as a model alias.
-
-This provides traceability from:
-
-Evaluation → Composite Score → Promotion Role → Registered Model Version
-
-3. Centralized MLflow Configuration
-
-Introduced:
+Function:
 
 configure_mlflow()
 
-to centralize:
+The function is responsible for configuring:
 
-Tracking URI
-Registry URI
-Experiment configuration
-Unity Catalog/non-UC configuration
+MLFLOW_TRACKING_URI
+MLFLOW_REGISTRY_URI
+MLflow experiment
+Unity Catalog/non-Unity Catalog configuration
 
-These settings are sourced from config.py.
+These values are now intended to come from config.py rather than being hard-coded in the pipeline.
 
-Reviewer focus:
-Verify that environment-specific MLflow configuration is not duplicated or hard-coded within the pipeline.
+Reviewer note:
+Please verify that environment-specific tracking/registry URIs and experiment names are correctly maintained in configuration rather than pipeline code.
 
-4. Source Lineage
+2. Source Lineage Tagging
 
-Added:
+Added centralized source lineage handling through:
 
 set_source_lineage_tags()
 
-to capture source information consistently, including file-based sources and support for Delta/Unity Catalog lineage.
+The function captures source-specific metadata such as:
 
-5. Input & Ground-Truth Logging
+Source file type
+Source path
+Delta table/version information where applicable
+Catalog/schema/table information for UC-based sources
 
-Added MLflow dataset/artifact logging for:
+This provides a consistent mechanism for tracking where inference data originated.
 
-Inference input
-Ground-truth/evaluation data
-Evaluation output
+Reviewer note:
+Please verify that the lineage tags are sufficient for both current file-based ingestion and future Delta/Unity Catalog sources.
 
-using:
+3. Input Dataset Logging
+
+Added MLflow dataset tracking using:
 
 mlflow.data.from_pandas()
 mlflow.log_input()
-log_artifact()
-log_artifacts()
 
-Artifacts are separated using appropriate paths such as:
+The inference dataset is now associated with the MLflow run using an explicit context:
+
+context="inference"
+
+The original input file is also logged as an artifact under:
 
 input/
+
+This allows reviewers to distinguish between the MLflow dataset reference and the actual input artifact.
+
+4. Ground Truth / Evaluation Data Logging
+
+Evaluation-related data is logged separately under:
+
 groundtruth/
-eval_output/
-6. Model-Specific Evaluation Metrics & Parameters
 
-Evaluation metrics and parameters are now extracted per model from eval_df_composite.
+The evaluation run is created as a nested MLflow run:
 
-Functions/logic involved:
+mlflow.start_run(
+    run_name="Evaluation",
+    nested=True
+)
+
+The evaluation run captures:
+
+Evaluation run ID
+Evaluation outputs
+Evaluation metrics
+Evaluation parameters
+Promotion metadata
+
+Reviewer note:
+Human/reference summaries are evaluation inputs and should not automatically become model-card metrics. They are excluded from model-card metadata where appropriate.
+
+5. Evaluation Metrics and Parameters
+
+Evaluation results are now converted into model-specific metrics and parameters.
+
+The important change is that metrics/parameters are extracted inside the registered-model loop, after filtering:
+
+model_rows = eval_df_composite[
+    eval_df_composite["model_name"] == model_name
+]
+
+This ensures that each model receives its own:
 
 eval_metrics
 eval_parameters
 
-Reference/human-summary fields are excluded from model-card metadata where appropriate.
+rather than accidentally reusing metrics from another model.
 
-This prevents metrics from one candidate model being reused for another model.
+Excluded fields include:
 
-7. Transformer Model Logging & Error Handling
+EXCLUDE_FROM_MODEL_CARD = {
+    "human_summary",
+    "ground_truth_summary",
+    "reference_summary",
+}
 
-Enhanced:
+Reviewer note:
+Please specifically review this section because multiple models are evaluated in the same evaluation run. Model-specific filtering prevents cross-model metric contamination.
+
+6. Model Logging with Error Handling
+
+Transformer models are logged using:
 
 log_transformer_model()
 
-with exception handling around:
+The function wraps:
 
 mlflow.transformers.log_model()
 
-The pipeline now verifies whether model logging succeeded before continuing to validation and registration.
+in exception handling to capture model serialization/deserialization failures.
 
-This provides controlled handling for serialization/deserialization or model-artifact logging failures.
+The pipeline checks the returned status:
 
-8. Model Validation & Registration
+model_logged = log_transformer_model(
+    model_name,
+    model_pipeline,
+)
 
-Models are validated before registration using:
+if not model_logged:
+    update_run_tags(
+        pipeline_status="failed",
+    )
+    return False
+
+This prevents the pipeline from continuing to model registration when model logging has failed.
+
+Reviewer note:
+Please verify that model-registration logic never proceeds with an invalid/incompletely logged model artifact.
+
+7. Model Validation and Registration
+
+Each successfully logged model is validated before registration:
 
 validate_model()
 
-and registered using:
+Models passing validation are registered using:
 
 register_model()
 
-Only successfully logged and validated models proceed to registration.
+The registered-model metadata includes:
+
+Model name
+Registered model name
+Version
+Dataset version
+Registration status
+8. Model-Version Evaluation and Promotion Tags
+
+Each registered model version is linked back to the evaluation run using:
+
+evaluation_run_id
+
+Additional model-version tags include:
+
+promotion_role
+composite_score
+
+For Unity Catalog, the appropriate promotion alias is also assigned.
+
+This creates a traceability chain:
+
+Dataset → Parent Run → Evaluation Run → Model Version → Promotion Role → Model Card
 
 9. Automated Model Card Generation
 
-Automated model-card creation was added using:
+Model cards are now generated programmatically using:
 
 build_model_card()
-save_model_card()
-log_model_card()
-tag_model_version_with_card()
 
-Each model card contains model-specific:
+The model card receives:
 
-Evaluation metrics
-Evaluation parameters
-Composite score
-Promotion role
-Model/version information
-Dataset version
-Parent/evaluation run IDs
+Model name
+Registered model name
+Model version
+Parent run ID
+Evaluation run ID
 Validation status
-10. End-to-End Traceability
+Dataset version
+Model-specific evaluation metrics
+Evaluation parameters
+Promotion role
+Composite score
 
-The resulting governance flow is:
+The generated card is then persisted using:
 
-Candidate Models
-      ↓
-Evaluation
-      ↓
-Quality Metrics
-      ↓
-Composite Score
-      ↓
+save_model_card()
+
+and logged using:
+
+log_model_card()
+
+Finally, the model version is tagged with the model-card location using:
+
+tag_model_version_with_card()
+Overall Traceability
+
+The intended flow after these changes is:
+
+Input Dataset
+     ↓
+Source Lineage
+     ↓
+Parent MLflow Run
+     ↓
+Inference
+     ↓
+Logged Transformer Models
+     ↓
+Validation
+     ↓
+Registered Model Version
+     ↓
+Evaluation Run
+     ↓
+Model-specific Metrics/Parameters
+     ↓
 Champion / Challenger
-      ↓
-Model Registration
-      ↓
-Model-Version Tags / UC Alias
-      ↓
+     ↓
+Model Version Tags / UC Alias
+     ↓
 Automated Model Card
-Reviewer Notes
+Reviewer Focus Areas
 
-Please focus particularly on:
+I would specifically ask reviewers to look at these areas:
 
-Composite-score calculation and weighting
-Champion/Challenger selection
-Correct association of scores with the right model
-Model-version promotion tags and UC aliases
-Model-specific evaluation metrics/parameters
-Centralized MLflow tracking/registry configuration
-Model-card contents and lineage
-Failure handling during transformer-model logging
-Thursday 6:06 PM
-What is shard in 30 words 
+configure_mlflow()
+Confirm tracking URI, registry URI and experiment configuration are fully centralized in config.py.
+set_source_lineage_tags()
+Confirm the lineage tags correctly support both file-based and future Delta/UC sources.
+Model-specific evaluation extraction
+Verify metrics and parameters are refreshed for every model and are not accidentally reused between models.
+log_transformer_model() error handling
+Verify serialization/deserialization failures correctly stop downstream registration.
+Model-version tags and promotion aliases
+Confirm champion/challenger roles and composite scores correspond to the correct model version.
+Model-card generation
+Verify that the model card contains only the relevant model's evaluation metrics/parameters and does not include raw human/reference summaries unnecessarily.
+MLflow artifact organization
+Confirm input, ground truth, evaluation output, model artifacts, and model cards have clear and non-overlapping artifact paths.
+PR Note
 
-A shard is a smaller part of a larger model or data file. Large Transformer model checkpoints are split into multiple shards so they can be stored, transferred, and loaded efficiently.
-
-Thursday 7:08 PM
-Are we using hugging face cache for downloading the model?
+Testing: Pipeline execution was validated across multiple models, with particular attention to model-specific evaluation metrics, MLflow lineage, model logging, registration, promotion metadata, and model-card generation.
 
 Yes. Based on your current code, pipeline("summarization", model=hf_model_name) uses the Hugging Face Transformers loading mechanism, which normally downloads the model into the Hugging Face cache if it isn't already cached.
 
